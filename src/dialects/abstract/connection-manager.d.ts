@@ -31,4 +31,8 @@ export interface ConnectionManager {
    * Release a pooled connection so it can be utilized by other connection requests
    */
   releaseConnection(conn: Connection): Promise<void>;
+  /**
+   * Destroys a pooled connection so it can be utilized by other connection requests
+   */
+  destroyConnection(conn: Connection): Promise<void>;
 }

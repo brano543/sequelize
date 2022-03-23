@@ -621,33 +621,59 @@ class Sequelize {
 
     const retryOptions = { ...this.options.retry, ...options.retry };
 
-    return retry(async () => {
-      if (options.transaction === undefined && Sequelize._cls) {
-        options.transaction = Sequelize._cls.get('transaction');
-      }
-
-      checkTransaction();
-
-      const connection = await (options.transaction ? options.transaction.connection : this.connectionManager.getConnection(options));
-      
-      if (this.options.dialect === 'db2' && options.alter) {
-        if (options.alter.drop === false) {
-          connection.dropTable = false;
+    let ret;
+    try {
+      ret = retry(async () => {
+        if (options.transaction === undefined && Sequelize._cls) {
+          options.transaction = Sequelize._cls.get('transaction');
         }
-      }
-      const query = new this.dialect.Query(connection, this, options);
 
-      try {
-        await this.runHooks('beforeQuery', options, query);
         checkTransaction();
-        return await query.run(sql, bindParameters);
-      } finally {
-        await this.runHooks('afterQuery', options, query);
-        if (!options.transaction) {
-          await this.connectionManager.releaseConnection(connection);
+
+        const connection = await (options.transaction ? options.transaction.connection : this.connectionManager.getConnection(options));
+
+        if (this.options.dialect === 'db2' && options.alter) {
+          if (options.alter.drop === false) {
+            connection.dropTable = false;
+          }
+        }
+        const query = new this.dialect.Query(connection, this, options);
+
+        try {
+          await this.runHooks('beforeQuery', options, query);
+          checkTransaction();
+          return await query.run(sql, bindParameters);
+        } catch (error) {
+          // destroy handle if it is marked as dead
+          if (!this.connectionManager._validate(connection)) {
+            await this.connectionManager.destroyConnection(connection);
+          }
+
+          throw error;
+        } finally {
+          await this.runHooks('afterQuery', options, query);
+          if (!options.transaction) {
+            await this.connectionManager.releaseConnection(connection);
+          }
+        }
+      }, retryOptions);
+      await ret;
+    } catch (error) {
+      if (error instanceof retry.TimeoutError) {
+        // remove all dead connections from pool
+        for (const connection of this.connectionManager.pool._inUseObjects) {
+          await this.connectionManager.destroyConnection(connection.resource);
+        }
+
+        for (const connection of this.connectionManager.pool._availableObjects) {
+          await this.connectionManager.destroyConnection(connection.resource);
         }
       }
-    }, retryOptions);
+
+      throw error;
+    }
+
+    return ret;
   }
 
   /**
